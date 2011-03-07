@@ -168,9 +168,9 @@ module RubyCAS
       # used to allow faking for testing
       # with cucumber and other tools.
       # use like 
-      #  CASClient::Frameworks::Rails::Filter.fake("homer")
+      #  RubyCAS::Filter.fake("homer")
       # you can also fake extra attributes by including a second parameter
-      #  CASClient::Frameworks::Rails::Filter.fake("homer", {:roles => ['dad', 'husband']})
+      #  RubyCAS::Filter.fake("homer", {:roles => ['dad', 'husband']})
       def fake(username, extra_attributes = nil)
         @@fake_user = username
         @@fake_extra_attributes = extra_attributes
