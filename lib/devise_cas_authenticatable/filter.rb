@@ -297,6 +297,9 @@ module RubyCAS
             
           log.info("Single-sign-out for ticket #{si.inspect} completed successfuly.")
           
+          # get rid of dummy sessions created by the CAS single sign out request
+          controller.request.reset_session
+          
           # Return true to indicate that a single-sign-out request was detected
           # and that further processing of the request is unnecessary.
           return true
