@@ -1,4 +1,3 @@
-
 require 'casclient'
 
 module RubyCAS
@@ -18,6 +17,16 @@ module RubyCAS
         @@config[:logger] = Rails.logger unless @@config[:logger]
         @@client = CASClient::Client.new(@@config)
         @@log = @@client.log
+        
+        ActiveRecord::SessionStore.session_class = RubyCas::Session
+        
+        if @@config[:update_session_table] && !RubyCas::Session.columns.any?{ |c| c.name == 'cas_ticket' }
+          RubyCas::Session.connection.add_column RubyCas::Session.table_name.to_sym, :cas_ticket, :string
+          RubyCas::Session.reset_column_information
+          RubyCas::Session.columns
+        end
+        
+        raise "Please add the cas_ticket column to your #{RubyCas::Session.table_name}" unless RubyCas::Session.columns.any?{ |c| c.name == 'cas_ticket' }
         
         @@client
       end
@@ -306,7 +315,7 @@ module RubyCAS
           session_id = read_service_session_lookup(si)
           
           if session_id
-            session = ActiveRecord::SessionStore::Session.find_by_session_id(session_id)
+            session = RubyCas::Session.find_by_session_id(session_id)
             if session
               session.destroy
               log.debug("Destroyed #{session.inspect} for session #{session_id.inspect} corresponding to service ticket #{si.inspect}.")
