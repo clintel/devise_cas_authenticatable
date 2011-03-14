@@ -9,7 +9,6 @@ module RubyCAS
     @@log = nil
     @@fake_user = nil
     @@fake_extra_attributes = nil
-    @@install_warden_hook_needed = true
 
     class << self
       def setup(config)
@@ -18,15 +17,17 @@ module RubyCAS
         @@client = CASClient::Client.new(@@config)
         @@log = @@client.log
         
-        ActiveRecord::SessionStore.session_class = RubyCas::Session
+        if config[:enable_single_sign_out]        
+          ActiveRecord::SessionStore.session_class = RubyCas::Session
         
-        if @@config[:update_session_table] && !RubyCas::Session.columns.any?{ |c| c.name == 'cas_ticket' }
-          RubyCas::Session.connection.add_column RubyCas::Session.table_name.to_sym, :cas_ticket, :string
-          RubyCas::Session.reset_column_information
-          RubyCas::Session.columns
+          if @@config[:update_session_table] && !RubyCas::Session.columns.any?{ |c| c.name == 'cas_ticket' }
+            RubyCas::Session.connection.add_column RubyCas::Session.table_name.to_sym, :cas_ticket, :string
+            RubyCas::Session.reset_column_information
+            RubyCas::Session.columns
+          end
+        
+          raise "Please add the cas_ticket column to your #{RubyCas::Session.table_name}" unless RubyCas::Session.columns.any?{ |c| c.name == 'cas_ticket' }
         end
-        
-        raise "Please add the cas_ticket column to your #{RubyCas::Session.table_name}" unless RubyCas::Session.columns.any?{ |c| c.name == 'cas_ticket' }
         
         @@client
       end
@@ -48,26 +49,6 @@ module RubyCAS
 
         last_st = controller.session[:cas_last_valid_ticket]        
         st = read_ticket(controller)
-
-        if controller.session[:update_cas_session]
-          controller.session.delete(:update_cas_session)
-
-          if config[:enable_single_sign_out]
-            f = store_service_session_lookup(last_st, controller.request.session_options[:id] || controller.session.session_id)
-            log.debug("Updated service session lookup file to #{f.inspect} with session id #{controller.request.session_options[:id] || controller.session.session_id.inspect}.")
-          end
-        end
-
-
-        if @@install_warden_hook_needed
-          @@install_warden_hook_needed = false
-          Warden::Manager.after_set_user({:event => [:set_user, :authentication]}, :push) do |record, warden, options|
-            if options[:scope] && warden.authenticated?(options[:scope])
-              warden.request.session[:update_cas_session] = true
-            end
-          end
-        end
-        
         is_new_session = true
         
         if st && last_st && 
@@ -113,11 +94,6 @@ module RubyCAS
               # so we need to set this here to ensure compatibility with configurations
               # built around the old client.
               controller.session[:casfilteruser] = vr.user
-              
-              if config[:enable_single_sign_out]
-                f = store_service_session_lookup(st, controller.request.session_options[:id] || controller.session.session_id)
-                log.debug("Wrote service session lookup file to #{f.inspect} with session id #{controller.request.session_options[:id] || controller.session.session_id.inspect}.")
-              end
             end
           
             # Store the ticket in the session to avoid re-validating the same service
@@ -248,7 +224,6 @@ module RubyCAS
       def logout(controller, service = nil)
         referer = service || controller.request.referer
         st = controller.session[:cas_last_valid_ticket]
-        delete_service_session_lookup(st) if st
         controller.send(:reset_session)
         controller.send(:redirect_to, client.logout_url(referer))
       end
@@ -312,21 +287,15 @@ module RubyCAS
           
           log.debug "Intercepted single-sign-out request for CAS session #{si.inspect}."
           
-          session_id = read_service_session_lookup(si)
-          
-          if session_id
-            session = RubyCas::Session.find_by_session_id(session_id)
-            if session
-              session.destroy
-              log.debug("Destroyed #{session.inspect} for session #{session_id.inspect} corresponding to service ticket #{si.inspect}.")
-            else
-              log.debug("Data for session #{session_id.inspect} was not found. It may have already been cleared by a local CAS logout request.")
-            end
-            
-            log.info("Single-sign-out for session #{session_id.inspect} completed successfuly.")
+          session = RubyCas::Session.find(:first, :conditions => ['cas_ticket=?', si.to_s])
+          if session
+            session.destroy
+            log.debug("Destroyed session #{session.id} corresponding to service ticket #{si.inspect}.")
           else
             log.warn("Couldn't destroy session with SessionIndex #{si} because no corresponding session id could be looked up.")
           end
+            
+          log.info("Single-sign-out for ticket #{si.inspect} completed successfuly.")
           
           # Return true to indicate that a single-sign-out request was detected
           # and that further processing of the request is unnecessary.
@@ -370,46 +339,7 @@ module RubyCAS
         log.debug("Guessed service url: #{service_url.inspect}")
         return service_url
       end
-      
-      # Creates a file in tmp/sessions linking a SessionTicket
-      # with the local Rails session id. The file is named
-      # cas_sess.<session ticket> and its text contents is the corresponding 
-      # Rails session id.
-      # Returns the filename of the lookup file created.
-      def store_service_session_lookup(st, sid)
-        st = st.ticket if st.kind_of? CASClient::ServiceTicket
-        f = File.new(filename_of_service_session_lookup(st), 'w')
-        f.write(sid)
-        f.close
-        return f.path
-      end
-      
-      # Returns the local Rails session ID corresponding to the given
-      # ServiceTicket. This is done by reading the contents of the
-      # cas_sess.<session ticket> file created in a prior call to 
-      # #store_service_session_lookup.
-      def read_service_session_lookup(st)
-        st = st.ticket if st.kind_of? CASClient::ServiceTicket
-        ssl_filename = filename_of_service_session_lookup(st)
-        return File.exists?(ssl_filename) && IO.read(ssl_filename)
-      end
-      
-      # Removes a stored relationship between a ServiceTicket and a local
-      # Rails session id. This should be called when the session is being
-      # closed.
-      #
-      # See #store_service_session_lookup.
-      def delete_service_session_lookup(st)
-        st = st.ticket if st.kind_of? CASClient::ServiceTicket
-        ssl_filename = filename_of_service_session_lookup(st)
-        File.delete(ssl_filename) if File.exists?(ssl_filename)
-      end
-      
-      # Returns the path and filename of the service session lookup file.
-      def filename_of_service_session_lookup(st)
-        st = st.ticket if st.kind_of? CASClient::ServiceTicket
-        return "#{Rails.root}/tmp/sessions/cas_sess.#{st}"
-      end
+
     end
     
     class GatewayFilter < Filter

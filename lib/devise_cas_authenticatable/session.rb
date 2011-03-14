@@ -3,10 +3,10 @@ module RubyCas
     before_save :save_cas_ticket
     
     def save_cas_ticket
-      if self.data
+      if self.data && self.cas_ticket.nil?
         t = self.data['cas_last_valid_ticket']
         if t
-          self.cas_ticket ||= t.ticket
+          self.cas_ticket = t.ticket
         end
       end
     end
